@@ -18,11 +18,7 @@ import mx.utils.*;
 import com.adobe.net.proxies.RFC2817Socket;
 import com.gsolo.encryption.MD5;
 
-[Event(name="message", type="flash.events.Event")]
-[Event(name="open", type="flash.events.Event")]
-[Event(name="close", type="flash.events.Event")]
-[Event(name="error", type="flash.events.Event")]
-[Event(name="stateChange", type="WebSocketStateEvent")]
+[Event(name="event", type="flash.events.Event")]
 public class WebSocketNoTLS extends EventDispatcher {
   
   private static var CONNECTING:int = 0;
@@ -41,10 +37,9 @@ public class WebSocketNoTLS extends EventDispatcher {
   private var origin:String;
   private var protocol:String;
   private var buffer:ByteArray = new ByteArray();
-  private var dataQueue:Array;
+  private var eventQueue:Array = [];
   private var headerState:int = 0;
   private var readyState:int = CONNECTING;
-  private var bufferedAmount:int = 0;
   private var headers:String;
   private var noiseChars:Array;
   private var expectedDigest:String;
@@ -95,23 +90,19 @@ public class WebSocketNoTLS extends EventDispatcher {
       socket.flush();
       main.log("sent: " + data);
       return -1;
-    } else if (readyState == CLOSED) {
+    } else if (readyState == CLOSING || readyState == CLOSED) {
       var bytes:ByteArray = new ByteArray();
       bytes.writeUTFBytes(data);
-      bufferedAmount += bytes.length; // not sure whether it should include \x00 and \xff
-      // We use return value to let caller know bufferedAmount because we cannot fire
-      // stateChange event here which causes weird error:
-      // > You are trying to call recursively into the Flash Player which is not allowed.
-      return bufferedAmount;
+      return bytes.length; // not sure whether it should include \x00 and \xff
     } else {
-      main.fatal("INVALID_STATE_ERR: invalid state");
+      main.fatal("invalid state");
       return 0;
     }
   }
   
   public function close():void {
     main.log("close");
-    dataQueue = [];
+    eventQueue = [];
     try {
       if (readyState == OPEN) {
         socket.writeByte(0xff);
@@ -126,17 +117,8 @@ public class WebSocketNoTLS extends EventDispatcher {
     // We do something equivalent in JavaScript WebSocket#close instead.
   }
   
-  public function getReadyState():int {
-    return readyState;
-  }
-  
-  public function getBufferedAmount():int {
-    return bufferedAmount;
-  }
-  
   private function onSocketConnect(event:Event):void {
     main.log("connected");
-    dataQueue = [];
     var hostValue:String = host + (port == 80 ? "" : ":" + port);
     var cookie:String = "";
     if (main.getCallerHost() == host) {
@@ -173,8 +155,7 @@ public class WebSocketNoTLS extends EventDispatcher {
   private function onSocketClose(event:Event):void {
     main.log("closed");
     readyState = CLOSED;
-    notifyStateChange();
-    dispatchEvent(new Event("close"));
+    fireEvent({type: "close"}, true);
   }
 
   private function onSocketIoError(event:IOErrorEvent):void {
@@ -204,8 +185,7 @@ public class WebSocketNoTLS extends EventDispatcher {
     if (state == CLOSED) return;
     main.error(message);
     close();
-    notifyStateChange();
-    dispatchEvent(new Event(state == CONNECTING ? "close" : "error"));
+    fireEvent({type: state == CONNECTING ? "close" : "error"}, true);
   }
 
   private function onSocketData(event:ProgressEvent):void {
@@ -240,8 +220,7 @@ public class WebSocketNoTLS extends EventDispatcher {
           removeBufferBefore(pos + 1);
           pos = -1;
           readyState = OPEN;
-          notifyStateChange();
-          dispatchEvent(new Event("open"));
+          fireEvent({type: "open"}, true);
         }
       } else {
         if (buffer[pos] == 0xff && pos > 0) {
@@ -251,8 +230,7 @@ public class WebSocketNoTLS extends EventDispatcher {
           }
           var data:String = readUTFBytes(buffer, 1, pos - 1);
           main.log("received: " + data);
-          dataQueue.push(encodeURIComponent(data));
-          dispatchEvent(new Event("message"));
+          fireEvent({type: "message", data: encodeURIComponent(data)}, false);
           removeBufferBefore(pos + 1);
           pos = -1;
         } else if (pos == 1 && buffer[0] == 0xff && buffer[1] == 0x00) { // closing
@@ -260,18 +238,15 @@ public class WebSocketNoTLS extends EventDispatcher {
           removeBufferBefore(pos + 1);
           pos = -1;
           close();
-          notifyStateChange();
-          dispatchEvent(new Event("close"));
+          fireEvent({type: "close"}, true);
         }
       }
     }
   }
 
-  public function readSocketData():Array {
-    var q:Array = dataQueue;
-    if (dataQueue.length > 0) {
-      dataQueue = [];
-    }
+  public function receiveEvents():Array {
+    var q:Array = eventQueue;
+    eventQueue = [];
     return q;
   }
   
@@ -334,8 +309,12 @@ public class WebSocketNoTLS extends EventDispatcher {
     buffer = nextBuffer;
   }
   
-  private function notifyStateChange():void {
-    dispatchEvent(new WebSocketStateEvent("stateChange", readyState, bufferedAmount));
+  private function fireEvent(event:Object, stateChanged:Boolean):void {
+    if (stateChanged) {
+      event.readyState = readyState;
+    }
+    eventQueue.push(event);
+    dispatchEvent(new Event("event"));
   }
   
   private function initNoiseChars():void {
