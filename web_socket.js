@@ -164,9 +164,10 @@
           
           if (this.__timer) clearInterval(this.__timer);
           if (window.opera) {
+            var self = this;
             // Workaround for weird behavior of Opera which sometimes drops events.
             this.__timer = setInterval(function () {
-              this.__handleEvents();
+              self.__handleEvents();
             }, 500);
           }
           if (this.onopen) this.onopen();
